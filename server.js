@@ -4,6 +4,17 @@ import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import pkg from "pg";
+import crypto from "crypto";
+import nodemailer from "nodemailer";
+
+
+const resetTokens = {};
+
+
+
+
+
+
 
 
 const { Pool } = pkg;
@@ -13,6 +24,8 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 
 const pool = new Pool({
@@ -22,6 +35,67 @@ const pool = new Pool({
     password: process.env.DB_PASS,
     port: process.env.DB_PORT
   });
+
+
+
+  app.post("/auth/forgot-password", async (req, res) => {
+    const { email } = req.body;
+    try {
+       const userResult = await pool.query("SELECT id FROM users WHERE email = $1", [email]); 
+
+       if(userResult.rows.length === 0){
+           return res.status(404).json({error: "Kullanıcı bulunamadı."});
+       }
+
+       const otpCode = crypto.randomInt(100000, 999999).toString();
+         resetTokens[email] = { otpCode,userId: userResult.rows[0].id, expires: Date.now() + 10 * 60 * 1000 };
+
+         console.log("🔑 Otp Kodu:", otpCode);
+
+
+         const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            },
+        });
+
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: "Şifre Sıfırlama",
+            text: `Şifrenizi sıfırlamak için bu kodu kullanın: ${otpCode}(10 dakika geçerlidir)`
+        };
+
+
+        await transporter.sendMail(mailOptions);
+        res.json({ message: "Şifre sıfırlama kodu e-posta adresinize gönderildi." });
+    } catch (error) {
+        console.error("Şifre sıfırlama hatası:", error);
+        res.status(500).json({ error: "Sunucu hatası" });
+    }
+});
+
+
+app.post("/auth/reset-password", async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+    try {
+        if(!resetTokens[email]|| resetTokens[email].otpCode !== otp){
+            return res.status(400).json({error: "Geçersiz veya süresi dolmuş şifre sıfırlama isteği."});
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword,10);
+        await pool.query("UPDATE users SET password = $1 WHERE id = $2", [hashedPassword, resetTokens[email].userId]);
+
+        delete resetTokens[email];
+        res.json({ message: "Şifre sıfırlandı!" });
+    } catch (error) {
+        console.error("Şifre sıfırlama hatası:", error);
+        res.status(500).json({ error: "Sunucu hatası" });   
+    }
+});
+
 
 
   app.post("/auth/register", async(req,res)=>{
@@ -202,7 +276,7 @@ app.get("/users" , async(req,res)=>{
 })
 
 app.put("/users/profile" , async(req,res)=>{
-    const [username,bio,favorite_genre,profile_picture]=req.body;
+    const {username,bio,favorite_genre,profile_picture}=req.body;
     const authHeader = req.headers.authorization;
     const token = authHeader && authHeader.split(" ")[1];
 
